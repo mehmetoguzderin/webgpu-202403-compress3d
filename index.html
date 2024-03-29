@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Volume Rendering with WebGL2</title>
+    <style>
+        canvas {
+            width: 512px;
+            height: 512px;
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas width=256 height=256 id="webglCanvas"></canvas>
+    <script>
+        'use strict';
+
+        async function main() {
+            const canvas = document.getElementById('webglCanvas');
+            const gl = canvas.getContext('webgl2');
+
+            if (!gl) {
+                console.error('WebGL 2 is not available.');
+                return;
+            }
+
+            var astc_ext = null;
+            var bc7_ext = null;
+            console.log(gl.getSupportedExtensions());
+            var supports_astc = gl.getSupportedExtensions().indexOf('WEBGL_compressed_texture_astc') >= 0;
+            if (supports_astc) {
+                astc_ext = gl.getExtension('WEBGL_compressed_texture_astc');
+                var supports_bc7 = gl.getSupportedExtensions().indexOf('EXT_texture_compression_bptc') >= 0;
+                if (supports_bc7) {
+                    bc7_ext = gl.getExtension('EXT_texture_compression_bptc');
+                }
+            }
+            else {
+                bc7_ext = gl.getExtension('EXT_texture_compression_bptc');
+            }
+
+            const vsSource = `#version 300 es
+out vec2 uv;
+void main() {
+    const vec2 vertices[3] = vec2[3](
+        vec2(-1.0, -1.0),
+        vec2(3.0, -1.0),
+        vec2(-1.0, 3.0)
+    );
+    uv = (vertices[gl_VertexID] + 1.0) / 2.0;
+    gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
+}
+        `;
+            const fsSource = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+
+in vec2 uv;
+
+uniform sampler3D uVolumeTex; 
+uniform vec3 uVolumeDims; 
+out vec4 fragColor;
+
+void main() {
+    vec3 rayDir = vec3(0.0, 0.0, 1.0); 
+    vec3 startPos = vec3(uv, 0.0); 
+    vec3 endPos = vec3(uv, 1.0); 
+    vec3 step = rayDir * (1.0 / uVolumeDims.z); 
+
+    vec4 accumulatedColor = vec4(0.0); 
+    for(float t = 0.0; t <= 1.0; t += length(step)) {
+        vec3 currentPos = mix(startPos, endPos, t); 
+        vec4 currentSample = texture(uVolumeTex, currentPos); 
+        accumulatedColor += vec4(currentSample.r * 0.01); 
+    }
+    accumulatedColor.a = 1.0;
+    fragColor = accumulatedColor;
+}
+        `;
+
+            function loadShader(type, source) {
+                const shader = gl.createShader(type);
+                gl.shaderSource(shader, source);
+                gl.compileShader(shader);
+                if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                    alert('An error occurred compiling the shaders: ' + gl.getShaderInfoLog(shader));
+                    gl.deleteShader(shader);
+                    return null;
+                }
+                return shader;
+            }
+
+            const vertexShader = loadShader(gl.VERTEX_SHADER, vsSource);
+            const fragmentShader = loadShader(gl.FRAGMENT_SHADER, fsSource);
+
+            const shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertexShader);
+            gl.attachShader(shaderProgram, fragmentShader);
+            gl.linkProgram(shaderProgram);
+            if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+                console.error('Unable to initialize the shader program: ' + gl.getProgramInfoLog(shaderProgram));
+                return;
+            }
+
+            gl.useProgram(shaderProgram);
+
+            var texture = null;
+
+            if (supports_astc && true) {
+                const textureData = await fetch('compress/compress3d-astc-4x4.bin').then(res => res.arrayBuffer());
+                const dataView = new Uint8Array(textureData);
+
+                texture = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_3D, texture);
+
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+
+                gl.compressedTexImage3D(gl.TEXTURE_3D, 0, astc_ext.COMPRESSED_RGBA_ASTC_4x4_KHR, 128, 128, 128, 0, new Uint8Array(textureData));
+
+                var error = gl.getError();
+                if (error != gl.NO_ERROR) {
+                    console.error('Error uploading ASTC texture.');
+                    console.error(error);
+                    return;
+                }
+
+                const text = document.createElement('div');
+                text.textContent = 'Using ASTC 2D';
+                document.body.appendChild(text);
+            } else {
+                const textureData = await fetch('compress/compress3d-bc7-4x4.bin').then(res => res.arrayBuffer());
+                const dataView = new Uint8Array(textureData);
+
+                texture = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_3D, texture);
+
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+
+                gl.compressedTexImage3D(gl.TEXTURE_3D, 0, bc7_ext.COMPRESSED_RGBA_BPTC_UNORM_EXT, 128, 128, 128, 0, new Uint8Array(textureData));
+
+                var error = gl.getError();
+                if (error != gl.NO_ERROR) {
+                    console.error('Error uploading BC7 texture.');
+                    console.error(error);
+                    return;
+                }
+
+                const text = document.createElement('div');
+                text.textContent = 'Using BC7 2D';
+                document.body.appendChild(text);
+            }
+
+            const uVolumeTexLoc = gl.getUniformLocation(shaderProgram, 'uVolumeTex');
+            const uVolumeDimsLoc = gl.getUniformLocation(shaderProgram, 'uVolumeDims');
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_3D, texture);
+            gl.uniform1i(uVolumeTexLoc, 0);
+            gl.uniform3f(uVolumeDimsLoc, 128.0, 128.0, 128.0);
+
+            function render() {
+                gl.clearColor(0.0, 0.0, 0.0, 1.0);
+                gl.clearDepth(1.0);
+                gl.enable(gl.DEPTH_TEST);
+                gl.depthFunc(gl.LEQUAL);
+
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+                requestAnimationFrame(render);
+            }
+
+            render();
+        }
+
+        main().catch(console.error);
+    </script>
+</body>
+
+</html>
